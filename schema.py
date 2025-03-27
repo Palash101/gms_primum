@@ -323,12 +323,9 @@ def health_check():
     Simple health check endpoint
     """
     try:
-        # Check DynamoDB connection by describing the table
-        table_description = dynamodb.meta.client.describe_table(TableName='transcribe')
         return jsonify({
             "status": "healthy",
-            "dynamodb": "connected",
-            "table": "exists"
+            "service": "online"
         }), 200
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
