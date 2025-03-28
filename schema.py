@@ -258,7 +258,16 @@ def check_status():
         
         # Check scheme ID and return result
         result = check_with_retry(scheme_id)
-        return jsonify(result), 200
+        
+        # If successful, parse the text into structured data
+        if result["status"] == "success" and "result" in result:
+            parsed_data = parse_eligibility_text(result["result"])
+            return jsonify({
+                "status": "success",
+                "data": parsed_data
+            }), 200
+        else:
+            return jsonify(result), 200
     
     except json.JSONDecodeError:
         return jsonify({"error": "Invalid JSON"}), 400
@@ -266,6 +275,65 @@ def check_status():
     except Exception as e:
         logger.error(f"Unexpected error in check_status: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+def parse_eligibility_text(text):
+    """
+    Parse the raw text response into structured JSON format
+    """
+    try:
+        lines = text.strip().split('\n')
+        data = {}
+        
+        # Initialize with default None values for expected fields
+        expected_fields = {
+            "Eligibility": None,
+            "Scheme Id": None,
+            "Scheme Type": None,
+            "Doctor Number": None,
+            "Date of Birth": None,
+            "Eligibility Start Date": None,
+            "Eligibility End Date": None
+        }
+        
+        current_key = None
+        
+        for line in lines:
+            line = line.strip()
+            if line == "Eligibility Details":
+                continue
+                
+            # If line contains a colon, it's a key-value pair
+            if ':' in line:
+                parts = line.split(':', 1)
+                current_key = parts[0].strip()
+                value = parts[1].strip() if len(parts) > 1 else None
+                
+                if current_key in expected_fields:
+                    data[current_key] = value
+            # If there's no colon but we have a current key, this line is a value
+            elif current_key and not line.endswith(':'):
+                if current_key in data and data[current_key]:
+                    data[current_key] += ' ' + line
+                else:
+                    data[current_key] = line
+        
+        # Convert to camelCase for better JSON format
+        formatted_data = {
+            "eligibility": data.get("Eligibility"),
+            "schemeId": data.get("Scheme Id"),
+            "schemeType": data.get("Scheme Type"),
+            "doctorNumber": data.get("Doctor Number"),
+            "dateOfBirth": data.get("Date of Birth"),
+            "eligibilityStartDate": data.get("Eligibility Start Date"),
+            "eligibilityEndDate": data.get("Eligibility End Date")
+        }
+        
+        return formatted_data
+        
+    except Exception as e:
+        logger.error(f"Error parsing eligibility text: {e}")
+        # If parsing fails, return the original text
+        return {"rawText": text}
 
 @app.route('/save/transcribe', methods=['POST'])
 def save_transcription():
