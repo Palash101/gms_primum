@@ -6,6 +6,7 @@ import json
 import boto3
 from botocore.exceptions import ClientError
 import datetime
+from flask_cors import CORS
 
 # Selenium and WebDriver imports
 from selenium import webdriver
@@ -161,6 +162,7 @@ class WebDriverPool:
 
 # Create Flask application instance
 app = Flask(__name__)
+CORS(app)
 
 @lru_cache(maxsize=100)
 def check_scheme_id(scheme_id):
