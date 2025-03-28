@@ -204,26 +204,60 @@ def check_scheme_id(scheme_id):
         # Add a brief pause to let the page transition complete
         time.sleep(1)
         
-        # Wait for the result with a stronger condition
-        # First wait for the page to stabilize after form submission
-        wait.until(
-            EC.staleness_of(input_field)
-        )
-        
-        # Then wait for the results to appear
-        card_element = wait.until(
-            EC.visibility_of_element_located((By.CSS_SELECTOR, "#page-content > div.main-box > div.pt-2 > div > div"))
-        )
-        
-        # Get the text after ensuring the element is stable
-        result = card_element.text
-        logger.info(f"Result obtained for scheme ID {scheme_id}")
-        
-        return {"status": "success", "result": result}
+        # First check for error message
+        try:
+            error_element = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "alert-danger"))
+            )
+            error_text = error_element.text.strip()
+            logger.info(f"Invalid scheme ID {scheme_id}: {error_text}")
+            
+            # Split the error message into title and detail
+            error_lines = error_text.split('\n')
+            error_title = error_lines[0] if error_lines else "Patient Not Found"
+            error_detail = error_lines[1] if len(error_lines) > 1 else f"The client identifier '{scheme_id}' was not found on any scheme."
+            
+            return {
+                "status": "error",
+                "code": "PATIENT_NOT_FOUND",
+                "title": error_title,
+                "message": error_detail
+            }
+        except:
+            # If no error message found, look for results
+            try:
+                card_element = wait.until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, "#page-content > div.main-box > div.pt-2 > div > div"))
+                )
+                result = card_element.text
+                
+                # Only return success if we actually have content
+                if result and "Eligibility Details" in result:
+                    logger.info(f"Result obtained for scheme ID {scheme_id}")
+                    return {"status": "success", "result": result}
+                else:
+                    return {
+                        "status": "error",
+                        "code": "PATIENT_NOT_FOUND",
+                        "title": "Patient Not Found",
+                        "message": f"The client identifier '{scheme_id}' was not found on any scheme."
+                    }
+            except:
+                return {
+                    "status": "error",
+                    "code": "NO_RESPONSE",
+                    "title": "System Error",
+                    "message": "Unable to retrieve eligibility information"
+                }
     
     except Exception as e:
         logger.error(f"Error checking scheme ID {scheme_id}: {e}")
-        return {"status": "error", "error": str(e)}
+        return {
+            "status": "error",
+            "code": "SYSTEM_ERROR",
+            "title": "System Error",
+            "message": "Unable to process the scheme ID check. Please try again later."
+        }
     
     finally:
         # Always release the driver back to pool
@@ -234,14 +268,19 @@ def check_with_retry(scheme_id, max_retries=3):
     for attempt in range(max_retries):
         try:
             result = check_scheme_id(scheme_id)
-            if result["status"] == "success":
-                return result
-            time.sleep(1)  # Wait before retrying
+            # Return both success AND error results without retrying
+            # Only retry on exceptions
+            return result
         except Exception as e:
             logger.error(f"Attempt {attempt+1} failed: {e}")
-    
-    # If all retries fail
-    return {"status": "error", "error": "Maximum retries exceeded"}
+            if attempt == max_retries - 1:  # If this was the last attempt
+                return {
+                    "status": "error",
+                    "code": "PATIENT_NOT_FOUND",
+                    "title": "Patient Not Found",
+                    "message": f"The client identifier '{scheme_id}' was not found on any scheme."
+                }
+            time.sleep(1)  # Wait before retrying
 
 @app.route('/check_status', methods=['POST'])
 def check_status():
@@ -254,12 +293,24 @@ def check_status():
         scheme_id = data.get('scheme_id')
         
         if not scheme_id:
-            return jsonify({"error": "Scheme ID is required"}), 400
+            return jsonify({
+                "status": "error",
+                "code": "MISSING_DATA",
+                "message": "Scheme ID is required"
+            }), 400
+        
+        # Validate scheme_id format (assuming it should be alphanumeric)
+        if not scheme_id.strip().isalnum():
+            return jsonify({
+                "status": "error",
+                "code": "INVALID_FORMAT",
+                "message": "Scheme ID should only contain letters and numbers"
+            }), 400
         
         # Check scheme ID and return result
         result = check_with_retry(scheme_id)
         
-        # If successful, parse the text into structured data
+        # If successful and has result data, parse the text into structured data
         if result["status"] == "success" and "result" in result:
             parsed_data = parse_eligibility_text(result["result"])
             return jsonify({
@@ -267,14 +318,23 @@ def check_status():
                 "data": parsed_data
             }), 200
         else:
-            return jsonify(result), 200
+            # Return the error response with 400 status code for invalid scheme IDs
+            return jsonify(result), 400
     
     except json.JSONDecodeError:
-        return jsonify({"error": "Invalid JSON"}), 400
+        return jsonify({
+            "status": "error",
+            "code": "INVALID_JSON",
+            "message": "Invalid JSON format in request"
+        }), 400
     
     except Exception as e:
         logger.error(f"Unexpected error in check_status: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({
+            "status": "error",
+            "code": "SYSTEM_ERROR",
+            "message": "An unexpected error occurred"
+        }), 500
 
 def parse_eligibility_text(text):
     """
