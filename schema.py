@@ -6,6 +6,8 @@ import json
 import boto3
 from botocore.exceptions import ClientError
 import datetime
+import time
+from flask_cors import CORS
 
 # Selenium and WebDriver imports
 from selenium import webdriver
@@ -157,11 +159,14 @@ class WebDriverPool:
         options.add_argument("--blink-settings=imagesEnabled=false")  # Disable images for speed
         options.page_load_strategy = 'eager'
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
         return options
 
 # Create Flask application instance
 app = Flask(__name__)
-
+CORS(app)
 @lru_cache(maxsize=100)
 def check_scheme_id(scheme_id):
     """
@@ -180,57 +185,41 @@ def check_scheme_id(scheme_id):
         logger.info(f"Checking scheme ID: {scheme_id}")
         driver.get("https://www.sspcrs.ie/portal/checker/pub/check")
         
+        # Use a longer wait time to ensure page is fully loaded
+        wait = WebDriverWait(driver, 15)
+        
         # Wait for and interact with webpage elements
-        input_field = WebDriverWait(driver, 10).until(
+        input_field = wait.until(
             EC.presence_of_element_located((By.ID, "schemeIdInput"))
         )
         input_field.clear()
         input_field.send_keys(scheme_id)
         
-        submit_button = driver.find_element(By.XPATH, "//button[@type='submit']")
+        # Ensure the submit button is clickable
+        submit_button = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
+        )
         submit_button.click()
         
-        # Wait for and get result
-        card_element = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#page-content > div.main-box > div.pt-2 > div > div"))
+        # Add a brief pause to let the page transition complete
+        time.sleep(1)
+        
+        # Wait for the result with a stronger condition
+        # First wait for the page to stabilize after form submission
+        wait.until(
+            EC.staleness_of(input_field)
         )
         
-        result_text = card_element.text
+        # Then wait for the results to appear
+        card_element = wait.until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, "#page-content > div.main-box > div.pt-2 > div > div"))
+        )
+        
+        # Get the text after ensuring the element is stable
+        result = card_element.text
         logger.info(f"Result obtained for scheme ID {scheme_id}")
         
-        # Parse the text into structured data
-        structured_data = {}
-        if "Eligibility Details" in result_text:
-            # Split the text by newlines to get key-value pairs
-            lines = result_text.split('\n')
-            
-            # Extract data
-            for i in range(len(lines)-1):
-                if i % 2 == 1 and i+1 < len(lines): 
-                    key = lines[i].strip(':')
-                    value = lines[i+1]
-                    if key and value:
-                        structured_data[key.lower().replace(' ', '_')] = value
-            
-            # Add validity field explicitly
-            structured_data["is_valid"] = "Valid" in result_text
-            
-            # Get scheme_id if available
-            if "scheme_id" in structured_data:
-                structured_data["scheme_id"] = structured_data["scheme_id"]
-            
-            return {
-                "status": "success", 
-                "data": structured_data,
-                "raw_result": result_text  # Include the original text for reference
-            }
-        else:
-            # For cases where the eligibility isn't found or is invalid
-            return {
-                "status": "success", 
-                "data": {"is_valid": False},
-                "raw_result": result_text
-            }
+        return {"status": "success", "result": result}
     
     except Exception as e:
         logger.error(f"Error checking scheme ID {scheme_id}: {e}")
@@ -240,6 +229,19 @@ def check_scheme_id(scheme_id):
         # Always release the driver back to pool
         if driver:
             WebDriverPool.release_driver(driver)
+
+def check_with_retry(scheme_id, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            result = check_scheme_id(scheme_id)
+            if result["status"] == "success":
+                return result
+            time.sleep(1)  # Wait before retrying
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} failed: {e}")
+    
+    # If all retries fail
+    return {"status": "error", "error": "Maximum retries exceeded"}
 
 @app.route('/check_status', methods=['POST'])
 def check_status():
@@ -255,7 +257,7 @@ def check_status():
             return jsonify({"error": "Scheme ID is required"}), 400
         
         # Check scheme ID and return result
-        result = check_scheme_id(scheme_id)
+        result = check_with_retry(scheme_id)
         return jsonify(result), 200
     
     except json.JSONDecodeError:
