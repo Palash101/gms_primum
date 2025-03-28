@@ -195,10 +195,42 @@ def check_scheme_id(scheme_id):
             EC.presence_of_element_located((By.CSS_SELECTOR, "#page-content > div.main-box > div.pt-2 > div > div"))
         )
         
-        result = card_element.text
+        result_text = card_element.text
         logger.info(f"Result obtained for scheme ID {scheme_id}")
         
-        return {"status": "success", "result": result}
+        # Parse the text into structured data
+        structured_data = {}
+        if "Eligibility Details" in result_text:
+            # Split the text by newlines to get key-value pairs
+            lines = result_text.split('\n')
+            
+            # Extract data
+            for i in range(len(lines)-1):
+                if i % 2 == 1 and i+1 < len(lines): 
+                    key = lines[i].strip(':')
+                    value = lines[i+1]
+                    if key and value:
+                        structured_data[key.lower().replace(' ', '_')] = value
+            
+            # Add validity field explicitly
+            structured_data["is_valid"] = "Valid" in result_text
+            
+            # Get scheme_id if available
+            if "scheme_id" in structured_data:
+                structured_data["scheme_id"] = structured_data["scheme_id"]
+            
+            return {
+                "status": "success", 
+                "data": structured_data,
+                "raw_result": result_text  # Include the original text for reference
+            }
+        else:
+            # For cases where the eligibility isn't found or is invalid
+            return {
+                "status": "success", 
+                "data": {"is_valid": False},
+                "raw_result": result_text
+            }
     
     except Exception as e:
         logger.error(f"Error checking scheme ID {scheme_id}: {e}")
